@@ -3,6 +3,18 @@
    (Extends style.css design tokens)
    ============================================================ */
 
+/* --- Helper page: allow scrolling on mobile --- */
+body {
+  overflow: visible;
+  overflow-y: auto;
+  min-height: 100dvh;
+}
+
+#app {
+  min-height: auto;
+  padding-bottom: 40px;
+}
+
 /* --- Nav --- */
 #helper-nav {
   width: 100%;
@@ -512,7 +524,22 @@
 }
 
 .replay-mini-board .mini-board-cell.just-placed {
-  border: 1px solid rgba(255,255,255,0.5);
+  border: 2px solid #ffc048;
+  box-shadow: 0 0 6px rgba(255,192,72,0.6), inset 0 0 4px rgba(255,192,72,0.25);
+}
+
+/* Cleared cells: white empty outline to indicate removal */
+.replay-mini-board .mini-board-cell.cleared {
+  background: transparent !important;
+  border: 1.5px solid rgba(255,255,255,0.5);
+  box-shadow: none !important;
+}
+
+/* Cell that was BOTH placed and cleared: gold border + no fill */
+.replay-mini-board .mini-board-cell.just-placed.cleared {
+  background: transparent !important;
+  border: 2px solid #ffc048;
+  box-shadow: 0 0 6px rgba(255,192,72,0.6) !important;
 }
 
 #replay-controls,

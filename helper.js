@@ -918,8 +918,17 @@
       playBoard[row + dr][col + dc] = cand.colorIdx;
     });
 
-    // Check lines
-    const cleared = clearLines();
+    // Snapshot after placing, before clearing — used for mini-board display
+    const boardAfterPlace = playBoard.map(r => [...r]);
+
+    // Render the placed piece BEFORE clearing so the user sees it land,
+    // and so that clearLines() can overlay the clearing animation on top.
+    renderPlayBoard();
+
+    // Check lines — this adds the CSS 'clearing' animation and modifies
+    // playBoard data; the setTimeout inside will re-render after 350 ms.
+    const clearedSet = clearLines();
+    const cleared = clearedSet.size;
 
     const boardAfter = playBoard.map(r => [...r]);
 
@@ -929,24 +938,27 @@
       row,
       col,
       boardBefore,
+      boardAfterPlace,
       boardAfter,
       cleared,
+      clearedCells: clearedSet,
       shape: cand.shape,
       colorIdx: cand.colorIdx,
     });
 
     usedCandidates[candidateIdx] = true;
-    renderPlayBoard();
+    // Don't call renderPlayBoard() here — the clearing animation is playing.
+    // clearLines()'s setTimeout will re-render when the animation finishes.
     renderPlayCandidates();
 
     // Check all placed
     if (usedCandidates.every(u => u)) {
-      // Success! Show replay
-      setTimeout(() => showReplayLightbox(), 300);
+      // Success! Show replay (wait for clearing animation if any)
+      setTimeout(() => showReplayLightbox(), cleared > 0 ? 500 : 300);
       return;
     }
 
-    // Check game over
+    // Check game over (board data is already correct — cleared synchronously)
     if (checkGameOver()) {
       isGameOver = true;
       dom.boardWrapper.classList.add('game-over');
@@ -995,7 +1007,7 @@
       }, 350);
     }
 
-    return toClear.size;
+    return toClear;
   }
 
   function checkGameOver() {
@@ -1068,7 +1080,9 @@
       info.className = 'replay-step-info';
       info.textContent = `放置於 (${step.row}, ${step.col})` + (step.cleared > 0 ? `  — 消除 ${step.cleared} 格` : '');
 
-      const miniBoard = renderMiniBoard(step.boardAfter, step.shape, step.row, step.col);
+      // Show board after placing (before clearing) so cleared cells are visible with markers
+      const displayBoard = step.clearedCells && step.clearedCells.size > 0 ? step.boardAfterPlace : step.boardAfter;
+      const miniBoard = renderMiniBoard(displayBoard, step.shape, step.row, step.col, step.clearedCells);
 
       div.appendChild(header);
       div.appendChild(info);
@@ -1079,11 +1093,12 @@
     dom.replayLightbox.classList.remove('hidden');
   }
 
-  function renderMiniBoard(board, shape, placeRow, placeCol) {
+  function renderMiniBoard(board, shape, placeRow, placeCol, clearedCells) {
     const grid = document.createElement('div');
     grid.className = 'replay-mini-board';
 
     const placedSet = shape ? new Set(shape.map(([dr, dc]) => `${placeRow + dr},${placeCol + dc}`)) : new Set();
+    const clearSet = clearedCells || new Set();
 
     for (let r = 0; r < BOARD_SIZE; r++) {
       for (let c = 0; c < BOARD_SIZE; c++) {
@@ -1096,6 +1111,9 @@
         }
         if (placedSet.has(`${r},${c}`)) {
           cell.classList.add('just-placed');
+        }
+        if (clearSet.has(`${r},${c}`)) {
+          cell.classList.add('cleared');
         }
         grid.appendChild(cell);
       }
@@ -1170,9 +1188,9 @@
           testBoard[r + dr][c + dc] = cand.colorIdx;
         });
 
-        const clearedCount = countClears(testBoard);
         const boardAfterPlace = testBoard.map(row => [...row]); // snapshot before clear
-        applyClears(testBoard);
+        const clearedSet = applyClears(testBoard);
+        const clearedCount = clearedSet.size;
 
         const step = {
           candidateIdx: cand.idx,
@@ -1180,8 +1198,10 @@
           col: c,
           shape: cand.shape,
           colorIdx: cand.colorIdx,
+          boardAfterPlace,
           boardAfter: testBoard.map(row => [...row]),
           cleared: clearedCount,
+          clearedCells: clearedSet,
         };
 
         // Recurse for remaining candidates
@@ -1204,27 +1224,6 @@
     return bestResult;
   }
 
-  function countClears(board) {
-    let count = 0;
-    const toClear = new Set();
-
-    for (let r = 0; r < BOARD_SIZE; r++) {
-      if (board[r].every(v => v >= 0)) {
-        for (let c = 0; c < BOARD_SIZE; c++) toClear.add(`${r},${c}`);
-      }
-    }
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      let full = true;
-      for (let r = 0; r < BOARD_SIZE; r++) {
-        if (board[r][c] < 0) { full = false; break; }
-      }
-      if (full) {
-        for (let r = 0; r < BOARD_SIZE; r++) toClear.add(`${r},${c}`);
-      }
-    }
-    return toClear.size;
-  }
-
   function applyClears(board) {
     const toClear = new Set();
     for (let r = 0; r < BOARD_SIZE; r++) {
@@ -1245,6 +1244,7 @@
       const [r, c] = key.split(',').map(Number);
       board[r][c] = -1;
     });
+    return toClear;
   }
 
   function permutations(arr) {
@@ -1274,7 +1274,9 @@
       info.className = 'replay-step-info';
       info.textContent = `放置於 (${step.row}, ${step.col})` + (step.cleared > 0 ? `  — 消除 ${step.cleared} 格` : '');
 
-      const miniBoard = renderMiniBoard(step.boardAfter, step.shape, step.row, step.col);
+      // Show board after placing (before clearing) so cleared cells are visible with markers
+      const displayBoard = step.clearedCells && step.clearedCells.size > 0 ? step.boardAfterPlace : step.boardAfter;
+      const miniBoard = renderMiniBoard(displayBoard, step.shape, step.row, step.col, step.clearedCells);
 
       div.appendChild(header);
       div.appendChild(info);
