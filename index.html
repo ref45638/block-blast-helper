@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Block Blast</title>
+  <meta name="description" content="Block Blast 風格的拼圖方塊遊戲，拖曳方塊填滿行列來消除得分！">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@600;800;900&family=Nunito:wght@700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Helper link -->
+    <a href="helper.html" style="align-self:flex-end;color:rgba(255,255,255,0.45);font-size:13px;text-decoration:none;font-family:var(--font-body);padding:2px 0;transition:color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='rgba(255,255,255,0.45)'">🧩 Helper 輔助工具 →</a>
+
+    <!-- Header: Score -->
+    <header id="header">
+      <div id="score-badge">
+        <svg class="crown-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+          <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5z"/>
+          <path d="M5 19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1H5v1z"/>
+        </svg>
+        <span id="best-score">0</span>
+      </div>
+      <div id="score-display">
+        <span id="score">0</span>
+      </div>
+    </header>
+
+    <!-- Board -->
+    <div id="board-wrapper">
+      <div id="board"></div>
+      <!-- Floating combo text -->
+      <div id="combo-text" class="hidden"></div>
+    </div>
+
+    <!-- Candidate Pieces -->
+    <div id="candidates"></div>
+
+    <!-- Game Over Overlay -->
+    <div id="game-over" class="hidden">
+      <div class="overlay-content">
+        <h2>遊戲結束</h2>
+        <p class="final-score-label">分數</p>
+        <p class="final-score" id="final-score">0</p>
+        <button id="restart-btn">再玩一次</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>

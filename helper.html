@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Block Blast Helper — 輔助分析</title>
+  <meta name="description" content="上傳 Block Blast 截圖或手動建立盤面，無限嘗試放置方塊，一鍵求解最佳答案。">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@600;800;900&family=Nunito:wght@700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="helper.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Nav -->
+    <nav id="helper-nav">
+      <a href="index.html" class="nav-link">← 回到遊戲</a>
+      <h1 class="nav-title">🧩 Helper</h1>
+    </nav>
+
+    <!-- ========== Phase 1: Setup ========== -->
+    <div id="setup-phase">
+      <!-- Mode Tabs -->
+      <div id="mode-tabs">
+        <button class="mode-tab active" data-mode="manual">✏️ 手動建立</button>
+        <button class="mode-tab" data-mode="screenshot">📷 上傳截圖</button>
+      </div>
+
+      <!-- Manual Mode -->
+      <div id="manual-mode" class="mode-panel">
+        <p class="mode-hint">點擊格子切換顏色來建立盤面</p>
+        <!-- Color Palette -->
+        <div id="color-palette"></div>
+        <!-- Board Editor -->
+        <div id="editor-board-wrapper">
+          <div id="editor-board"></div>
+        </div>
+        <p class="mode-hint" style="margin-top:12px">設定三個候選方塊（點擊小格子切換）</p>
+        <div id="editor-candidates">
+          <div class="editor-candidate-group" data-idx="0">
+            <div class="candidate-editor-grid"></div>
+          </div>
+          <div class="editor-candidate-group" data-idx="1">
+            <div class="candidate-editor-grid"></div>
+          </div>
+          <div class="editor-candidate-group" data-idx="2">
+            <div class="candidate-editor-grid"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Screenshot Mode -->
+      <div id="screenshot-mode" class="mode-panel hidden">
+        <div id="upload-zone">
+          <input type="file" id="screenshot-input" accept="image/*" hidden>
+          <div id="upload-placeholder">
+            <span class="upload-icon">📷</span>
+            <p>拖放截圖到此處<br>或<strong>點擊上傳</strong></p>
+            <span class="upload-hint">系統將自動偵測 8×8 棋盤</span>
+          </div>
+        </div>
+        <!-- Analysis status -->
+        <div id="analysis-status" class="hidden">
+          <div id="analysis-spinner" class="mini-spinner"></div>
+          <p id="analysis-text">正在自動偵測棋盤...</p>
+        </div>
+        <!-- Preview of detected board -->
+        <div id="detected-preview" class="hidden">
+          <p class="mode-hint">✅ 自動偵測完成！預覽如下，可點「套用到編輯器」修正</p>
+          <div id="preview-board"></div>
+          <div id="preview-actions">
+            <button id="apply-detected-btn" class="ctrl-btn accent">套用到編輯器</button>
+            <button id="retry-upload-btn" class="ctrl-btn small">重新上傳</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Start Button -->
+      <button id="start-btn" class="action-btn primary" disabled>
+        ▶ 開始嘗試放置
+      </button>
+    </div>
+
+    <!-- ========== Phase 2: Play ========== -->
+    <div id="play-phase" class="hidden">
+      <!-- Board -->
+      <div id="board-wrapper">
+        <div id="board"></div>
+        <div id="combo-text" class="hidden"></div>
+        <!-- Game Over Btn (centered in board) -->
+        <button id="reset-center-btn" class="action-btn primary hidden">🔄 重新嘗試</button>
+      </div>
+
+      <!-- Candidates -->
+      <div id="candidates"></div>
+
+      <!-- Controls -->
+      <div id="controls">
+        <button id="reset-btn" class="ctrl-btn">🔄 重置盤面</button>
+        <button id="solve-btn" class="ctrl-btn accent">🤖 自動求解</button>
+        <button id="back-setup-btn" class="ctrl-btn">⬅ 返回設置</button>
+      </div>
+    </div>
+
+    <!-- ========== Lightbox: Step Replay ========== -->
+    <div id="replay-lightbox" class="hidden">
+      <div class="lightbox-content">
+        <h2>✅ 放置完成！</h2>
+        <div id="replay-steps"></div>
+        <div id="replay-controls">
+          <button id="replay-close-btn" class="action-btn primary">關閉</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== Lightbox: Solver Result ========== -->
+    <div id="solver-lightbox" class="hidden">
+      <div class="lightbox-content">
+        <h2>🤖 最佳解法</h2>
+        <div id="solver-result"></div>
+        <div id="solver-controls">
+          <button id="solver-apply-btn" class="action-btn primary">套用此解法</button>
+          <button id="solver-close-btn" class="ctrl-btn">關閉</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Solving spinner -->
+    <div id="solving-overlay" class="hidden">
+      <div class="solving-spinner">
+        <div class="spinner-ring"></div>
+        <p>正在計算最佳解法...</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="helper.js"></script>
+</body>
+</html>
