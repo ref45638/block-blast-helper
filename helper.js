@@ -376,16 +376,15 @@
 
   /**
    * Auto-detect the 8×8 board from a screenshot.
-   * Strategy:
-   *  1. Sample the app background colour from image edges
-   *  2. Build a per-row "content width" profile (non-background pixels)
-   *  3. The board is the tallest continuous band of wide rows
-   *  4. Crop to square, then detect grid gaps for precise cell alignment
-   *  5. Sample centre of each cell and match colours
+   * Strategy (position-first approach):
+   *  1. Find board region via background detection + band analysis
+   *  2. Divide into 8×8 grid, extract each cell's centre pixel patch
+   *  3. Use Otsu's method on brightness to classify empty vs filled
+   *  4. Assign nearest colour to filled cells (best-effort)
    */
   function autoDetectBoard(img) {
     const canvas = document.createElement('canvas');
-    const maxW = 600;
+    const maxW = 800;
     const scale = Math.min(maxW / img.width, 1);
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
@@ -393,16 +392,16 @@
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const w = canvas.width, h = canvas.height;
-    const data = imgData.data;
+    const pxData = imgData.data;
 
     function px(x, y) {
       x = clamp(Math.round(x), 0, w - 1);
       y = clamp(Math.round(y), 0, h - 1);
       const i = (y * w + x) * 4;
-      return [data[i], data[i + 1], data[i + 2]];
+      return [pxData[i], pxData[i + 1], pxData[i + 2]];
     }
-    function luma(r, g, b) { return r * 0.299 + g * 0.587 + b * 0.114; }
-    function colorDist(r1, g1, b1, r2, g2, b2) {
+    function lumaVal(r, g, b) { return r * 0.299 + g * 0.587 + b * 0.114; }
+    function cDist(r1, g1, b1, r2, g2, b2) {
       return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
     }
 
@@ -422,7 +421,7 @@
       let left = w, right = 0;
       for (let x = 0; x < w; x++) {
         const [r, g, b] = px(x, y);
-        if (colorDist(r, g, b, bgR, bgG, bgB) > BG_DIST) {
+        if (cDist(r, g, b, bgR, bgG, bgB) > BG_DIST) {
           if (x < left) left = x;
           if (x > right) right = x;
         }
@@ -461,11 +460,9 @@
     /* ── 4. Crop to square ── */
     let bW = bR - bL, bH = bB - bT;
     const side = Math.min(bW, bH);
-    // Centre horizontally
     const midX = (bL + bR) / 2;
     bL = Math.round(midX - side / 2);
     bR = bL + side;
-    // If band is taller than wide, pick the vertical slice with the most content
     if (bH > side * 1.05) {
       let bestScore = -1, bestTop = bT;
       const step = Math.max(1, Math.round((bH - side) / 20));
@@ -474,7 +471,7 @@
         for (let sy = t; sy < t + side; sy += Math.max(1, Math.round(side / 16))) {
           for (let sx = bL; sx < bR; sx += Math.max(1, Math.round(side / 16))) {
             const [r, g, b] = px(sx, sy);
-            if (luma(r, g, b) > 70) score++;
+            if (lumaVal(r, g, b) > 70) score++;
           }
         }
         if (score > bestScore) { bestScore = score; bestTop = t; }
@@ -487,78 +484,105 @@
       bB = bT + side;
     }
 
-    /* ── 5. Detect grid gaps for precise cell alignment ── */
-    function buildProfile(isCol) {
-      const profile = new Float64Array(side);
-      const sampleN = Math.min(side, 120);
-      for (let i = 0; i < side; i++) {
-        let sum = 0;
-        for (let j = 0; j < sampleN; j++) {
-          const jPos = Math.round(j * side / sampleN);
-          const [r, g, b] = isCol ? px(bL + i, bT + jPos) : px(bL + jPos, bT + i);
-          sum += luma(r, g, b);
-        }
-        profile[i] = sum / sampleN;
-      }
-      return profile;
-    }
+    /* ── 5. Shrink inward to exclude board border ── */
+    const borderPad = Math.round(side * 0.02);
+    bL += borderPad; bR -= borderPad; bT += borderPad; bB -= borderPad;
+    const innerSide = bR - bL;
 
-    function findCellCenters(profile) {
-      const n = profile.length;
-      // Smooth with kernel=3
-      const sm = new Float64Array(n);
-      for (let i = 0; i < n; i++) {
-        let s = 0, c = 0;
-        for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) { s += profile[j]; c++; }
-        sm[i] = s / c;
-      }
-      // Find local minima
-      const minima = [];
-      for (let i = 3; i < n - 3; i++) {
-        if (sm[i] <= sm[i - 1] && sm[i] <= sm[i + 1] && sm[i] < sm[i - 2] && sm[i] < sm[i + 2]) {
-          minima.push(i);
-        }
-      }
-      if (minima.length < 5) return null;
-
-      // Select best 7 roughly-evenly-spaced minima
-      const expectedSpacing = n / 8;
-      let bestGaps = null, bestErr = Infinity;
-      for (let s = 0; s <= minima.length - 7; s++) {
-        const gaps = minima.slice(s, s + 7);
-        const spans = [gaps[0]];
-        for (let i = 1; i < 7; i++) spans.push(gaps[i] - gaps[i - 1]);
-        spans.push(n - gaps[6]);
-        const err = spans.reduce((sum, sp) => sum + Math.abs(sp - expectedSpacing), 0);
-        if (err < bestErr) { bestErr = err; bestGaps = gaps; }
-      }
-      if (!bestGaps || bestErr > n * 0.5) return null;
-
-      const boundaries = [0, ...bestGaps, n];
-      return Array.from({ length: 8 }, (_, i) => (boundaries[i] + boundaries[i + 1]) / 2);
-    }
-
-    const colCenters = findCellCenters(buildProfile(true));
-    const rowCenters = findCellCenters(buildProfile(false));
-
-    /* ── 6. Sample each cell ── */
-    const cellSize = side / BOARD_SIZE;
-    const sampleRadius = Math.max(1, Math.round(cellSize * 0.15));
-    const board = createEmptyBoard();
+    /* ── 6. Extract 64 cell pixel arrays (raw pixels, no averaging) ── */
+    const cellSize = innerSide / BOARD_SIZE;
+    const cellInset = cellSize * 0.25; // skip 25% per edge to avoid grid lines
+    const cells64 = []; // [{row, col, pixels: [[r,g,b], ...]}]
 
     for (let r = 0; r < BOARD_SIZE; r++) {
       for (let c = 0; c < BOARD_SIZE; c++) {
-        const cx = bL + (colCenters ? colCenters[c] : (c + 0.5) * cellSize);
-        const cy = bT + (rowCenters ? rowCenters[r] : (r + 0.5) * cellSize);
+        const x0 = bL + c * cellSize + cellInset;
+        const x1 = bL + (c + 1) * cellSize - cellInset;
+        const y0 = bT + r * cellSize + cellInset;
+        const y1 = bT + (r + 1) * cellSize - cellInset;
 
-        let tR = 0, tG = 0, tB = 0, cnt = 0;
-        for (let dy = -sampleRadius; dy <= sampleRadius; dy++) {
-          for (let dx = -sampleRadius; dx <= sampleRadius; dx++) {
-            const [pr, pg, pb] = px(cx + dx, cy + dy);
-            tR += pr; tG += pg; tB += pb; cnt++;
+        const pixels = [];
+        const sampStep = Math.max(1, Math.round((x1 - x0) / 5));
+        for (let sy = Math.round(y0); sy <= Math.round(y1); sy += sampStep) {
+          for (let sx = Math.round(x0); sx <= Math.round(x1); sx += sampStep) {
+            pixels.push(px(sx, sy));
           }
         }
-        board[r][c] = matchColor(Math.round(tR / cnt), Math.round(tG / cnt), Math.round(tB / cnt));
+        cells64.push({ row: r, col: c, pixels });
+      }
+    }
+
+    /* ── 7. Find the "empty cell" reference ──
+     * The darkest cell is almost certainly empty. Collect its raw pixels
+     * as the reference template. Then also gather a few of the darkest
+     * cells to form a robust empty-pixel pool.
+     */
+    // Compute median luma per cell (median is robust to outlier pixels)
+    for (const cell of cells64) {
+      const lumas = cell.pixels.map(([r, g, b]) => lumaVal(r, g, b));
+      lumas.sort((a, b) => a - b);
+      cell.medianLuma = lumas[lumas.length >> 1];
+    }
+
+    // Sort by median luma to find darkest cells
+    const byLuma = [...cells64].sort((a, b) => a.medianLuma - b.medianLuma);
+
+    // Use the darkest ~25% of cells (at least 8) as "empty" reference pool
+    const emptyPoolSize = Math.max(8, Math.round(cells64.length * 0.25));
+    const emptyPool = byLuma.slice(0, emptyPoolSize);
+
+    // Build the average empty-pixel colour from the pool
+    let eR = 0, eG = 0, eB = 0, eCnt = 0;
+    for (const cell of emptyPool) {
+      for (const [r, g, b] of cell.pixels) {
+        eR += r; eG += g; eB += b; eCnt++;
+      }
+    }
+    eCnt = Math.max(eCnt, 1);
+    const emptyRefR = eR / eCnt, emptyRefG = eG / eCnt, emptyRefB = eB / eCnt;
+
+    /* ── 8. Compare each cell's pixels against empty reference ──
+     * For each cell, compute the average colour distance of its pixels
+     * from the empty reference colour. A filled cell's pixels will be
+     * very different from the dark empty colour — even dark reds.
+     */
+    const cellDists = cells64.map(cell => {
+      let totalDist = 0;
+      for (const [r, g, b] of cell.pixels) {
+        totalDist += cDist(r, g, b, emptyRefR, emptyRefG, emptyRefB);
+      }
+      return { ...cell, avgDist: totalDist / cell.pixels.length };
+    });
+
+    // Use Otsu on the distance values to find the best threshold
+    const distValues = cellDists.map(c => c.avgDist).sort((a, b) => a - b);
+    const n = distValues.length;
+    let bestVariance = 0, distThresh = distValues[n >> 1];
+    const sumAll = distValues.reduce((s, v) => s + v, 0);
+    let w1 = 0, sum1 = 0;
+    for (let i = 0; i < n - 1; i++) {
+      w1++;
+      sum1 += distValues[i];
+      const w2 = n - w1;
+      const m1 = sum1 / w1;
+      const m2 = (sumAll - sum1) / w2;
+      const variance = w1 * w2 * (m1 - m2) ** 2;
+      if (variance > bestVariance) {
+        bestVariance = variance;
+        distThresh = (distValues[i] + distValues[i + 1]) / 2;
+      }
+    }
+
+    /* ── 9. Build board: filled if pixel distance from empty > threshold ── */
+    const board = createEmptyBoard();
+    for (const cell of cellDists) {
+      if (cell.avgDist > distThresh) {
+        // Filled — find dominant colour from pixel median
+        const rs = cell.pixels.map(p => p[0]).sort((a, b) => a - b);
+        const gs = cell.pixels.map(p => p[1]).sort((a, b) => a - b);
+        const bs = cell.pixels.map(p => p[2]).sort((a, b) => a - b);
+        const mr = rs[rs.length >> 1], mg = gs[gs.length >> 1], mb = bs[bs.length >> 1];
+        board[cell.row][cell.col] = matchColor(mr, mg, mb);
       }
     }
 
@@ -607,23 +631,20 @@
   }
 
   function matchColor(r, g, b) {
-    // Brightness check — dark cells are empty
-    const brightness = (r * 0.299 + g * 0.587 + b * 0.114);
-    if (brightness < 65) return -1;
-
-    // Match against known colors
+    // Simple nearest-colour match for filled cells.
+    // Empty/filled decision is handled by autoDetectBoard, not here.
     const targetColors = [
-      { r: 255, g: 107, b: 107 }, // red
-      { r: 255, g: 169, b: 77 },  // orange
-      { r: 255, g: 224, b: 102 }, // yellow
-      { r: 81,  g: 207, b: 102 }, // green
-      { r: 102, g: 217, b: 232 }, // cyan
-      { r: 116, g: 185, b: 255 }, // blue
-      { r: 177, g: 151, b: 252 }, // purple
-      { r: 247, g: 131, b: 172 }, // pink
+      { r: 255, g: 107, b: 107 }, // 0 red
+      { r: 255, g: 169, b: 77 },  // 1 orange
+      { r: 255, g: 224, b: 102 }, // 2 yellow
+      { r: 81,  g: 207, b: 102 }, // 3 green
+      { r: 102, g: 217, b: 232 }, // 4 cyan
+      { r: 116, g: 185, b: 255 }, // 5 blue
+      { r: 177, g: 151, b: 252 }, // 6 purple
+      { r: 247, g: 131, b: 172 }, // 7 pink
     ];
 
-    let bestIdx = -1, bestDist = Infinity;
+    let bestIdx = 1, bestDist = Infinity; // default orange
     for (let i = 0; i < targetColors.length; i++) {
       const t = targetColors[i];
       const dist = Math.sqrt((r - t.r) ** 2 + (g - t.g) ** 2 + (b - t.b) ** 2);
@@ -632,8 +653,7 @@
         bestIdx = i;
       }
     }
-
-    return bestDist < 120 ? bestIdx : -1;
+    return bestIdx;
   }
 
   // ══════════════════════════════════════════
