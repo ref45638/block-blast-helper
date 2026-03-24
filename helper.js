@@ -35,6 +35,7 @@
   // Screenshot state
   let uploadedImg = null;
   let detectedBoard = null;          // board from auto-detection
+  let detectedCandidates = null;     // [{cells, colorIdx}] from auto-detection
 
   // Drag state
   let dragData = null;
@@ -360,10 +361,19 @@
     // Use setTimeout to allow UI update before heavy computation
     setTimeout(() => {
       try {
-        const board = autoDetectBoard(img);
-        detectedBoard = board;
+        const result = autoDetectBoard(img);
+        detectedBoard = result.board;
+
+        // Try to detect candidates below the board
+        try {
+          detectedCandidates = autoDetectCandidates(result.region);
+        } catch (candErr) {
+          console.warn('Candidate detection failed:', candErr);
+          detectedCandidates = null;
+        }
+
         dom.analysisStatus.classList.add('hidden');
-        showDetectedPreview(board);
+        showDetectedPreview(result.board, detectedCandidates);
       } catch (err) {
         console.error('Auto-detect failed:', err);
         dom.analysisText.textContent = '⚠️ 自動偵測失敗，請確認截圖包含完整棋盤';
@@ -586,12 +596,408 @@
       }
     }
 
-    return board;
+    return { board, region: { left: bL, top: bT, right: bR, bottom: bB, side: innerSide, canvas, pxData: imgData.data, w, h } };
   }
 
-  function showDetectedPreview(board) {
+  // ══════════════════════════════════════════
+  //  AUTO-DETECT CANDIDATES (below the board)
+  // ══════════════════════════════════════════
+
+  function autoDetectCandidates(region) {
+    const { left: bL, top: bT, right: bR, bottom: bB, side, canvas, pxData, w, h } = region;
+
+    const boardWidth = bR - bL;
+    const boardHeight = bB - bT;
+    const cellSize = side / 8;   // side is the FULL board side; divide by 8 for per-cell size
+
+    console.log('[CandDetect] region:', { bL, bT, bR, bB, side, w, h, boardWidth, boardHeight, cellSize });
+
+    // Helper: get pixel at (x,y)
+    function px(x, y) {
+      x = clamp(Math.round(x), 0, w - 1);
+      y = clamp(Math.round(y), 0, h - 1);
+      const i = (y * w + x) * 4;
+      return [pxData[i], pxData[i + 1], pxData[i + 2]];
+    }
+    function brightness(rgb) { return rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114; }
+    function colorDist(a, b) { return Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2); }
+
+    /* ── 1. Define search area below the board ── */
+    const searchTop = Math.round(bB + cellSize * 0.3);
+    const searchBottom = Math.min(h - 5, Math.round(bB + boardHeight * 1.5));
+    console.log('[CandDetect] search range:', { searchTop, searchBottom, rangeH: searchBottom - searchTop });
+    if (searchTop >= searchBottom || searchBottom - searchTop < cellSize) {
+      console.log('[CandDetect] BAIL: search range too small');
+      return null;
+    }
+
+    /* ── 2. Get background colour from areas certain to be background ── */
+    // Use the gap strip right below the board (first few rows below bB)
+    const bgSamples = [];
+    // Sample from image edges far from centre (almost certainly bg)
+    for (let y = searchTop; y < searchBottom; y += Math.max(1, Math.round((searchBottom - searchTop) / 30))) {
+      for (let dx = 0; dx < 8; dx++) {
+        bgSamples.push(px(dx + 1, y));
+        bgSamples.push(px(w - 2 - dx, y));
+      }
+    }
+    // Also sample the narrow gap between board bottom and candidate area
+    for (let x = bL; x < bR; x += 3) {
+      bgSamples.push(px(x, bB + 2));
+      bgSamples.push(px(x, bB + 5));
+    }
+    bgSamples.sort((a, b) => brightness(a) - brightness(b));
+    const bgColor = bgSamples[bgSamples.length >> 1];
+    console.log('[CandDetect] bgColor:', bgColor, 'brightness:', brightness(bgColor));
+
+    /* ── 3. Row scan: use LOCAL variance within a sliding window ── */
+    // For each row, instead of comparing to bg, compute the variance of
+    // brightness across the row. Rows that cross block edges will have
+    // higher variance than pure background rows.
+    const scanLeft = Math.round(Math.max(0, bL - cellSize * 0.5));
+    const scanRight = Math.round(Math.min(w - 1, bR + cellSize * 0.5));
+
+    const rowScores = [];
+    for (let y = searchTop; y < searchBottom; y++) {
+      // Collect brightness values and colour distances along this row
+      const brs = [];
+      const dists = [];
+      for (let x = scanLeft; x <= scanRight; x += 2) {
+        const p = px(x, y);
+        brs.push(brightness(p));
+        dists.push(colorDist(p, bgColor));
+      }
+
+      // Gradient score: count significant brightness jumps
+      let jumps = 0;
+      for (let i = 1; i < brs.length; i++) {
+        if (Math.abs(brs[i] - brs[i-1]) > 12) jumps++;
+      }
+      const jumpRatio = brs.length > 1 ? jumps / (brs.length - 1) : 0;
+
+      // Colour distance score: fraction of pixels noticeably different from bg
+      const distCount = dists.filter(d => d > 20).length;
+      const distRatio = dists.length > 0 ? distCount / dists.length : 0;
+
+      // Variance score
+      const meanBr = brs.reduce((a,b) => a+b, 0) / brs.length;
+      const variance = brs.reduce((s,b) => s + (b-meanBr)**2, 0) / brs.length;
+      const varScore = Math.min(1, variance / 500);
+
+      // Combined score
+      const score = Math.max(jumpRatio, distRatio * 0.5, varScore);
+      rowScores.push({ y, score, jumpRatio, distRatio, varScore });
+    }
+
+    const maxScore = Math.max(...rowScores.map(r => r.score));
+    console.log('[CandDetect] maxRowScore:', maxScore.toFixed(4),
+      'sample scores:', rowScores.filter((_,i) => i % 30 === 0).map(r => `y${r.y}:${r.score.toFixed(3)}`).join(' '));
+
+    if (maxScore < 0.02) {
+      console.log('[CandDetect] BAIL: maxRowScore too low');
+      return null;
+    }
+
+    // Adaptive threshold: find bands where activity is significantly above background level
+    // Calculate background noise level (bottom 25% of scores)
+    const sortedScores = rowScores.map(r => r.score).sort((a,b) => a - b);
+    const noiseLevel = sortedScores[Math.floor(sortedScores.length * 0.25)];
+    const rowThresh = Math.max(0.02, noiseLevel + (maxScore - noiseLevel) * 0.15);
+    console.log('[CandDetect] noiseLevel:', noiseLevel.toFixed(4), 'rowThresh:', rowThresh.toFixed(4));
+
+    // Find continuous bands of activity
+    const bands = [];
+    let curBand = null;
+    let gapRows = 0;
+    const maxRowGap = Math.round(cellSize * 0.3);  // allow small gaps in activity
+
+    for (const rs of rowScores) {
+      if (rs.score > rowThresh) {
+        if (!curBand) curBand = { top: rs.y, bottom: rs.y, maxScore: rs.score, totalScore: rs.score };
+        else {
+          curBand.bottom = rs.y;
+          curBand.maxScore = Math.max(curBand.maxScore, rs.score);
+          curBand.totalScore += rs.score;
+        }
+        gapRows = 0;
+      } else {
+        if (curBand) {
+          gapRows++;
+          if (gapRows > maxRowGap) {
+            if (curBand.bottom - curBand.top > cellSize * 0.15) bands.push(curBand);
+            curBand = null;
+            gapRows = 0;
+          }
+        }
+      }
+    }
+    if (curBand && curBand.bottom - curBand.top > cellSize * 0.15) bands.push(curBand);
+
+    console.log('[CandDetect] activity bands:', bands.length,
+      bands.map(b => ({ top: b.top, bottom: b.bottom, h: b.bottom - b.top, maxScore: b.maxScore.toFixed(3) })));
+
+    if (bands.length === 0) {
+      console.log('[CandDetect] BAIL: no activity bands found');
+      return null;
+    }
+
+    // Filter out any band that is clearly the ad banner (usually at the very bottom and very wide/tall)
+    // Also filter bands that are too far from the board (likely UI elements)
+    const candBands = bands.filter(b => {
+      const distFromBoard = b.top - bB;
+      return distFromBoard < boardHeight * 1.0 && (b.bottom - b.top) < boardHeight * 0.8;
+    });
+
+    if (candBands.length === 0) {
+      console.log('[CandDetect] BAIL: no candidate bands after filtering');
+      return null;
+    }
+
+    // Pick the band closest to the board (candidates are right below)
+    candBands.sort((a, b) => a.top - b.top);
+    const mainBand = candBands[0];
+    const candTop = mainBand.top;
+    const candBottom = mainBand.bottom;
+    const candHeight = candBottom - candTop;
+    console.log('[CandDetect] main band:', { candTop, candBottom, candHeight });
+
+    /* ── 4. Estimate candidate cell size ── */
+    const possibleCellSizes = [
+      Math.round(candHeight / 1),
+      Math.round(candHeight / 2),
+      Math.round(candHeight / 3),
+      Math.round(candHeight / 4),
+    ].filter(s => s >= 6 && s <= cellSize * 1.5);
+    const targetCandSize = cellSize * 0.55;
+    possibleCellSizes.sort((a, b) => Math.abs(a - targetCandSize) - Math.abs(b - targetCandSize));
+    const candCellSize = possibleCellSizes[0] || Math.round(cellSize * 0.55);
+    const candGap = Math.max(1, Math.round(candCellSize * 0.12));
+    console.log('[CandDetect] candCellSize:', candCellSize, 'boardCellSize:', cellSize);
+
+    /* ── 5. Column scan: find piece blobs ── */
+    // For each x column in the candidate band, compute activity
+    const colActivity = [];
+    for (let x = scanLeft; x <= scanRight; x++) {
+      let activity = 0, total = 0;
+      for (let y = candTop; y <= candBottom; y += 2) {
+        const p = px(x, y);
+        const dist = colorDist(p, bgColor);
+
+        // Check local contrast with nearby pixels
+        const pAbove = px(x, y - 3);
+        const pBelow = px(x, y + 3);
+        const vGrad = Math.abs(brightness(pAbove) - brightness(pBelow));
+
+        const pLeft = px(x - 3, y);
+        const pRight = px(x + 3, y);
+        const hGrad = Math.abs(brightness(pLeft) - brightness(pRight));
+
+        // A pixel is "active" if it differs from bg OR has local gradient
+        if (dist > 15 || vGrad > 12 || hGrad > 12) activity++;
+        total++;
+      }
+      colActivity.push({ x, ratio: total > 0 ? activity / total : 0 });
+    }
+
+    // Log column activity for debugging
+    console.log('[CandDetect] col activity sample:',
+      colActivity.filter((_,i) => i % 10 === 0).map(c => `x${c.x}:${c.ratio.toFixed(2)}`).join(' '));
+
+    // Find background noise level in columns
+    const colRatios = colActivity.map(c => c.ratio).sort((a,b) => a - b);
+    const colNoise = colRatios[Math.floor(colRatios.length * 0.2)];
+    const colThresh = Math.max(0.08, colNoise + (colRatios[colRatios.length - 1] - colNoise) * 0.2);
+    console.log('[CandDetect] colNoise:', colNoise.toFixed(3), 'colThresh:', colThresh.toFixed(3));
+
+    // Group active columns into blobs
+    const blobs = [];
+    let curBlob = null;
+    let gapCount = 0;
+    const maxColGap = Math.max(3, Math.round(candCellSize * 0.4));
+
+    for (const cs of colActivity) {
+      if (cs.ratio > colThresh) {
+        if (!curBlob) curBlob = { minX: cs.x, maxX: cs.x, peakRatio: cs.ratio };
+        else { curBlob.maxX = cs.x; curBlob.peakRatio = Math.max(curBlob.peakRatio, cs.ratio); }
+        gapCount = 0;
+      } else {
+        if (curBlob) {
+          gapCount++;
+          if (gapCount > maxColGap) {
+            blobs.push(curBlob);
+            curBlob = null;
+            gapCount = 0;
+          }
+        }
+      }
+    }
+    if (curBlob) blobs.push(curBlob);
+
+    console.log('[CandDetect] col blobs:', blobs.length,
+      blobs.map(b => ({ minX: b.minX, maxX: b.maxX, w: b.maxX - b.minX, peak: b.peakRatio.toFixed(2) })));
+
+    // Filter blobs: must be at least half a cell wide
+    const minBlobW = Math.max(4, candCellSize * 0.3);
+    const maxBlobW = candCellSize * 8;
+    const validBlobs = blobs.filter(b => {
+      const bw = b.maxX - b.minX;
+      return bw >= minBlobW && bw <= maxBlobW;
+    });
+    console.log('[CandDetect] validBlobs:', validBlobs.length);
+
+    if (validBlobs.length === 0) {
+      console.log('[CandDetect] BAIL: no valid column blobs');
+      return null;
+    }
+
+    /* ── 6. For each blob, detect shape on a 5×5 grid ── */
+    const results = [];
+
+    for (const blob of validBlobs) {
+      if (results.length >= 3) break;
+
+      const blobCenterX = (blob.minX + blob.maxX) / 2;
+      const blobW = blob.maxX - blob.minX;
+
+      // Determine grid dimensions
+      const gridCols = Math.max(1, Math.min(5, Math.round((blobW + candGap) / (candCellSize + candGap))));
+      const gridRows = Math.max(1, Math.min(5, Math.round((candHeight + candGap) / (candCellSize + candGap))));
+
+      // Centre the grid within the blob
+      const gridW = gridCols * candCellSize + (gridCols - 1) * candGap;
+      const gridH = gridRows * candCellSize + (gridRows - 1) * candGap;
+      const gridLeft = blobCenterX - gridW / 2;
+      const gridTop2 = candTop + (candHeight - gridH) / 2;
+
+      const cells = createEmpty2D(5, 5);
+      let matchedColor = -1;
+      let filledCount = 0;
+
+      for (let r = 0; r < gridRows; r++) {
+        for (let c = 0; c < gridCols; c++) {
+          const cx = gridLeft + c * (candCellSize + candGap) + candCellSize / 2;
+          const cy = gridTop2 + r * (candCellSize + candGap) + candCellSize / 2;
+
+          // Sample a small area around the centre
+          const sampleRadius = Math.max(2, Math.round(candCellSize * 0.3));
+          const pixels = [];
+          const sStep = Math.max(1, Math.round(sampleRadius / 3));
+          for (let dy = -sampleRadius; dy <= sampleRadius; dy += sStep) {
+            for (let dx = -sampleRadius; dx <= sampleRadius; dx += sStep) {
+              pixels.push(px(cx + dx, cy + dy));
+            }
+          }
+
+          // Check if these pixels are different from background
+          const dists = pixels.map(p => colorDist(p, bgColor));
+          const avgDist = dists.reduce((a, b) => a + b, 0) / dists.length;
+
+          // Also check brightness variance (filled cells have 3D highlights)
+          const brs = pixels.map(p => brightness(p));
+          const meanBr = brs.reduce((a, b) => a + b, 0) / brs.length;
+          const brVariance = brs.reduce((s, b) => s + (b - meanBr) ** 2, 0) / brs.length;
+
+          // A filled cell: either clearly different from bg, or has high internal variance (3D shading)
+          const isFilled = avgDist > 25 || (avgDist > 15 && brVariance > 50);
+
+          if (isFilled) {
+            cells[r][c] = 1;
+            filledCount++;
+            // Determine colour from median
+            const rs2 = pixels.map(p => p[0]).sort((a, b) => a - b);
+            const gs2 = pixels.map(p => p[1]).sort((a, b) => a - b);
+            const bs2 = pixels.map(p => p[2]).sort((a, b) => a - b);
+            const mr = rs2[rs2.length >> 1], mg = gs2[gs2.length >> 1], mb = bs2[bs2.length >> 1];
+            matchedColor = matchColor(mr, mg, mb);
+          }
+        }
+      }
+
+      console.log('[CandDetect] blob result:', { filledCount, matchedColor, gridCols, gridRows, blobW });
+      if (filledCount > 0 && matchedColor >= 0) {
+        results.push({ cells, colorIdx: matchedColor });
+      }
+    }
+
+    console.log('[CandDetect] final results:', results.length);
+    return results.length > 0 ? results : null;
+  }
+
+  // ── Re-render all editor candidate grids with current data ──
+  function renderAllEditorCandidates() {
+    dom.editorCandidates.forEach((group, idx) => {
+      const data = editorCandidates[idx];
+      if (!data) return;
+      let grid = group.querySelector('.candidate-editor-grid');
+      if (!grid) return;
+      // Clone grid to remove ALL old event listeners (prevents old/new handler conflicts)
+      const freshGrid = grid.cloneNode(false);
+      grid.parentNode.replaceChild(freshGrid, grid);
+      grid = freshGrid;
+      // Rebuild grid to match data dimensions
+      const rows = data.cells.length;
+      const cols = data.cells[0].length;
+      grid.innerHTML = '';
+      grid.style.gridTemplateColumns = `repeat(${cols}, 22px)`;
+      grid.style.gridTemplateRows = `repeat(${rows}, 22px)`;
+
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cell = document.createElement('div');
+          cell.className = 'mini-cell';
+          cell.dataset.r = r;
+          cell.dataset.c = c;
+          if (data.cells[r][c]) {
+            cell.classList.add('active');
+            cell.style.background = COLORS[data.colorIdx].bg;
+          }
+          grid.appendChild(cell);
+        }
+      }
+
+      // Re-bind paint events
+      let candPainting = false;
+      let candPaintOn = false;
+
+      grid.addEventListener('pointerdown', e => {
+        const cell = e.target.closest('.mini-cell');
+        if (!cell) return;
+        e.preventDefault();
+        const r = +cell.dataset.r, c = +cell.dataset.c;
+        candPaintOn = !data.cells[r][c];
+        candPainting = true;
+        applyCandPaint(idx, r, c, candPaintOn);
+        grid.setPointerCapture(e.pointerId);
+      });
+
+      grid.addEventListener('pointermove', e => {
+        if (!candPainting) return;
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el) return;
+        const cell = el.closest('.mini-cell');
+        if (!cell || !grid.contains(cell)) return;
+        const r = +cell.dataset.r, c = +cell.dataset.c;
+        applyCandPaint(idx, r, c, candPaintOn);
+      });
+
+      grid.addEventListener('pointerup', () => { candPainting = false; });
+      grid.addEventListener('pointercancel', () => { candPainting = false; });
+    });
+  }
+
+  function showDetectedPreview(board, cands) {
     dom.detectedPreview.classList.remove('hidden');
     dom.previewBoard.innerHTML = '';
+
+    // Update hint text based on candidate detection
+    const hint = dom.detectedPreview.querySelector('.mode-hint');
+    if (hint) {
+      if (cands && cands.length > 0) {
+        hint.textContent = `✅ 偵測到棋盤 + ${cands.length} 個候選方塊！可點「套用到編輯器」修正`;
+      } else {
+        hint.textContent = '✅ 棋盤偵測完成（未偵測到候選方塊，需手動編輯）';
+      }
+    }
 
     for (let r = 0; r < BOARD_SIZE; r++) {
       for (let c = 0; c < BOARD_SIZE; c++) {
@@ -605,11 +1011,78 @@
         dom.previewBoard.appendChild(cell);
       }
     }
+
+    // Show detected candidates preview
+    const previewCands = document.getElementById('preview-candidates');
+    if (previewCands) {
+      previewCands.innerHTML = '';
+      if (cands && cands.length > 0) {
+        previewCands.classList.remove('hidden');
+        cands.forEach((cand, i) => {
+          if (!cand) return;
+          const group = document.createElement('div');
+          group.className = 'preview-cand-group';
+
+          // Find bounding box of the filled cells
+          let minR = cand.cells.length, maxR = 0, minC = cand.cells[0].length, maxC = 0;
+          let hasFill = false;
+          for (let r = 0; r < cand.cells.length; r++) {
+            for (let c = 0; c < cand.cells[r].length; c++) {
+              if (cand.cells[r][c]) {
+                hasFill = true;
+                if (r < minR) minR = r;
+                if (r > maxR) maxR = r;
+                if (c < minC) minC = c;
+                if (c > maxC) maxC = c;
+              }
+            }
+          }
+          if (!hasFill) return;
+
+          const rows = maxR - minR + 1;
+          const cols = maxC - minC + 1;
+          const grid = document.createElement('div');
+          grid.className = 'preview-cand-grid';
+          grid.style.gridTemplateColumns = `repeat(${cols}, 18px)`;
+          grid.style.gridTemplateRows = `repeat(${rows}, 18px)`;
+
+          for (let r = minR; r <= maxR; r++) {
+            for (let c = minC; c <= maxC; c++) {
+              const cell = document.createElement('div');
+              cell.className = 'preview-cand-cell';
+              if (cand.cells[r][c]) {
+                cell.classList.add('filled');
+                cell.style.background = COLORS[cand.colorIdx].bg;
+              }
+              grid.appendChild(cell);
+            }
+          }
+
+          group.appendChild(grid);
+          previewCands.appendChild(group);
+        });
+      } else {
+        previewCands.classList.add('hidden');
+      }
+    }
   }
 
   function applyDetectedBoard() {
     if (!detectedBoard) return;
     editorBoard = detectedBoard.map(row => [...row]);
+
+    // Apply detected candidates if available
+    if (detectedCandidates) {
+      detectedCandidates.forEach((cand, idx) => {
+        if (idx >= 3) return;
+        if (cand) {
+          editorCandidates[idx] = {
+            cells: cand.cells.map(row => [...row]),
+            colorIdx: cand.colorIdx
+          };
+        }
+      });
+    }
 
     // Switch to manual mode for any touch-ups
     currentMode = 'manual';
@@ -617,6 +1090,8 @@
     dom.manualMode.classList.remove('hidden');
     dom.screenshotMode.classList.add('hidden');
     renderEditorBoard();
+    // Re-render candidate grids with detected data
+    renderAllEditorCandidates();
     updateStartBtn();
   }
 
@@ -627,6 +1102,7 @@
     dom.detectedPreview.classList.add('hidden');
     dom.ssInput.value = '';
     detectedBoard = null;
+    detectedCandidates = null;
     uploadedImg = null;
   }
 
